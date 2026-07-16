@@ -43,6 +43,21 @@ interface DatapiPnlResp {
   totalCount?: number; hasNext?: boolean; positions?: DatapiPosition[];
 }
 
+// --- sanity bounds -----------------------------------------------------------
+// datapi mis-prices pools whose token decimals/quotes are broken: we've seen single
+// positions reported at ~2e10 SOL (more than the entire SOL supply) and PnL in the
+// hundreds of millions. Meteora DLMM's *entire* TVL is only in the hundreds of
+// millions of dollars, so any single position past these bounds is a pricing bug,
+// not a whale. Such positions are dropped — we only aggregate what we can price
+// sanely. (Heuristic: the rigorous fix is cross-checking each token against Jupiter
+// pricing, which is a separate normalization pass.)
+const MAX_SOL_PER_POSITION = 50_000;      // ≈ $4M at $80/SOL — already beyond any real position
+const MAX_USD_PER_POSITION = 5_000_000;
+
+function plausible(...values: Array<{ v: number; max: number }>): boolean {
+  return values.every(({ v, max }) => Number.isFinite(v) && Math.abs(v) <= max);
+}
+
 /** One parsed position — the unit of on-chain per-wallet analytics. */
 export interface PositionRow {
   pnlUsd: number; pnlSol: number;
@@ -81,6 +96,19 @@ export async function getPoolPnl(
     for (const p of positions) {
       const pnlUsd = Number(p.pnlUsd ?? 0);
       const pnlSol = Number(p.pnlSol ?? 0);
+      const depositUsd = Number(p.allTimeDeposits?.total?.usd ?? 0);
+      const depositSol = Number(p.allTimeDeposits?.total?.sol ?? 0);
+      // drop positions datapi priced implausibly — they'd poison every aggregate
+      if (
+        !plausible(
+          { v: pnlSol, max: MAX_SOL_PER_POSITION },
+          { v: depositSol, max: MAX_SOL_PER_POSITION },
+          { v: pnlUsd, max: MAX_USD_PER_POSITION },
+          { v: depositUsd, max: MAX_USD_PER_POSITION },
+        )
+      ) {
+        continue;
+      }
       totalPnlUsd += pnlUsd;
       totalPnlSol += pnlSol;
       positionCount++;
@@ -89,9 +117,7 @@ export async function getPoolPnl(
         binRanges.push([p.lowerBinId, p.upperBinId]);
       }
       rows.push({
-        pnlUsd, pnlSol,
-        depositUsd: Number(p.allTimeDeposits?.total?.usd ?? 0),
-        depositSol: Number(p.allTimeDeposits?.total?.sol ?? 0),
+        pnlUsd, pnlSol, depositUsd, depositSol,
         createdAt: p.createdAt ?? 0,
         closedAt: p.closedAt ?? null,
       });
@@ -212,25 +238,55 @@ function base58Encode(buf: Uint8Array): string {
  * still picked up by the pool/stream discovery + accumulate over time.)
  */
 export async function discoverAllOpenPositionWallets(): Promise<string[]> {
+  return [...(await censusWalletPositions()).keys()];
+}
+
+export interface CensusEntry {
+  /** Pools this wallet currently has open positions in. */
+  pools: Set<string>;
+  /** Number of open position accounts. */
+  positions: number;
+}
+
+/**
+ * TIER-1 SIGNAL, FREE — the whole universe mapped in ONE query.
+ *
+ * PositionV2 layout is `discriminator(8) | lbPair(32) | owner(32)`, so a single
+ * dataSlice at offset 8 length 64 returns BOTH the pool and the owner for every
+ * open position. Grouping by owner yields, for all ~88k wallets at once: which
+ * pools they're in and how many positions they hold — with zero per-wallet calls.
+ * That's the cheap ranking pass that decides who deserves deep analysis.
+ */
+export async function censusWalletPositions(): Promise<Map<string, CensusEntry>> {
   const discB58 = base58Encode(Buffer.from(POSITION_V2_DISCRIMINATOR, "hex"));
   const body = {
     jsonrpc: "2.0", id: 1, method: "getProgramAccounts",
     params: [METEORA_DLMM_PROGRAM, {
       encoding: "base64",
-      dataSlice: { offset: 40, length: 32 }, // owner only
+      dataSlice: { offset: 8, length: 64 }, // lbPair(32) + owner(32)
       filters: [{ memcmp: { offset: 0, bytes: discB58 } }],
     }],
   };
   const r = await fetch(PUBLIC_RPC, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
   });
-  const j = (await r.json()) as { result?: Array<{ account: { data: [string, string] } }>; error?: { message?: string } };
+  const j = (await r.json()) as {
+    result?: Array<{ account: { data: [string, string] } }>;
+    error?: { message?: string };
+  };
   if (j.error) throw new Error(`getProgramAccounts: ${j.error.message}`);
-  const owners = new Set<string>();
+
+  const byOwner = new Map<string, CensusEntry>();
   for (const a of j.result ?? []) {
-    owners.add(base58Encode(Buffer.from(a.account.data[0], "base64")));
+    const buf = Buffer.from(a.account.data[0], "base64");
+    const pool = base58Encode(buf.subarray(0, 32));
+    const owner = base58Encode(buf.subarray(32, 64));
+    let e = byOwner.get(owner);
+    if (!e) { e = { pools: new Set(), positions: 0 }; byOwner.set(owner, e); }
+    e.pools.add(pool);
+    e.positions++;
   }
-  return [...owners];
+  return byOwner;
 }
 
 /** Most active pools by 24h volume, from datapi's pool list (with bin step). */
@@ -347,6 +403,39 @@ export async function getWalletDeepPnl(
     }
   }
   return { pnlUsd, pnlSol, positions, pools: priced, openTimes };
+}
+
+export interface WalletQuickStats {
+  pools: number;
+  positions: number;
+  pnlUsd: number;
+  pnlSol: number;
+  depositUsd: number;
+  depositSol: number;
+}
+
+/**
+ * TIER 2 — the cheap real-money signal. Looks ONLY at the wallet's currently-open
+ * positions (1 RPC call) and reads page 1 of each pool's position list, so cost is
+ * ~1 + (open pools) calls instead of the hundreds a full-history walk needs.
+ * Gives deposit size + live PnL — enough to rank whales and decide who is worth a
+ * TIER 3 deep analysis.
+ */
+export async function getWalletQuickStats(wallet: string): Promise<WalletQuickStats> {
+  const pools = await getWalletPools(wallet);
+  let pnlUsd = 0, pnlSol = 0, depositUsd = 0, depositSol = 0, positions = 0;
+  for (const pool of pools) {
+    try {
+      const p = await getPoolPnl(pool, wallet, 1); // page 1 only — this is the cheap tier
+      pnlUsd += p.totalPnlUsd;
+      pnlSol += p.totalPnlSol;
+      positions += p.rows.length;
+      for (const r of p.rows) { depositUsd += r.depositUsd; depositSol += r.depositSol; }
+    } catch {
+      /* datapi can't price this pool — skip */
+    }
+  }
+  return { pools: pools.length, positions, pnlUsd, pnlSol, depositUsd, depositSol };
 }
 
 export interface WalletAnalytics {

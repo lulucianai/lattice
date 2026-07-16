@@ -1,6 +1,6 @@
 # lattice — Claude handoff guide
 
-> Baca **Status terkini** sebelum lanjut. Detail install/run lengkap ada di `README.md`.
+> Read **Current status** before continuing. Full install/run details: `README.md`.
 
 ---
 
@@ -8,133 +8,128 @@
 
 | Item | Value |
 |------|-------|
-| Nama | **lattice** (codename samaran) — tracker top Meteora DLMM LP wallets |
-| Opsec | Nama/README/judul-halaman **netral** (nggak nyebut Meteora/DLMM) + `robots: noindex`. **CATATAN:** isi kode tetap memuat endpoint (`dlmm.datapi.meteora.ag`, program DLMM, lpagent) → kalau repo **public**, GitHub code-search TETAP bisa nemu. Proteksi nyata = repo private. User pilih public + samaran (sudah diberi tahu risikonya). |
-| Path | `D:\codevibe\topdlmm` (folder lokal masih nama lama; **project/repo = `lattice`**) |
-| Goal | Scrape SEMUA wallet aktif Meteora DLMM → dataset lengkap & real per-wallet (PnL, fee, playstyle) → leaderboard. Mirip tool teman user (header 42k wallet + leaderboard playstyle). Buat riksa/riset. |
-| Referensi konsep | web teman user (gambar), `bengbeng.app` (full-history PnL 1 wallet, kita = massal otomatis) |
-| Prinsip | **NOL dummy** — real scrape + on-chain + normalisasi, akumulatif 24/7 |
+| Name | **lattice** (codename) — tracker for top Meteora DLMM LP wallets |
+| Path | `D:\codevibe\topdlmm` (local folder still has the old name; **project/repo = `lattice`**) |
+| Repo | https://github.com/lulucianai/lattice (**public**) |
+| Goal | Enumerate every active Meteora DLMM LP wallet → complete, real per-wallet dataset (PnL, fees, playstyle) → leaderboard. Modeled on the user's friend's tool (42k-wallet header + playstyle leaderboard). For research. |
+| Concept refs | friend's dashboard (screenshots), `bengbeng.app` (full-history PnL for ONE wallet on demand — we do it automatically, en masse) |
+| Principle | **ZERO dummy data** — real scrape + on-chain + normalization, accumulated 24/7 |
 
-Stack: **Node/TS monorepo (npm workspaces) + Python scraper (Scrapling)**, DB `node:sqlite` (Postgres-ready untuk VPS). Node 20+, Python 3.10+.
+**Opsec:** name / README / page title are neutral (no protocol keywords) and the app
+sends `robots: noindex`. **BUT** the code necessarily contains `dlmm.datapi.meteora.ag`,
+the DLMM program id, and `app.lpagent.io` — on a **public** repo GitHub code-search
+will still find it. Real protection = private repo. The user chose public + codename
+after being told this.
 
-## Arsitektur (3 proses, 1 DB `data/lattice.sqlite`)
+Stack: **Node/TS monorepo (npm workspaces) + Python scraper (Scrapling)**, DB via
+`node:sqlite` (Postgres-ready). Node 20+, Python 3.10+.
+
+## Architecture (3 processes, 1 DB `data/lattice.sqlite`)
 
 ```
-Python/Scrapling  scraper/discover.py   → DISCOVERY lpagent (Cloudflare-hard)
-Node worker       packages/ingest/worker.ts → discover on-chain + enrich + deep-enrich
-Next.js           packages/web           → dashboard :3737
+Python/Scrapling  scraper/discover.py       → OPTIONAL lpagent metrics (Cloudflare-hard)
+Node worker       packages/ingest/worker.ts → census + enrich + deep analytics
+Next.js           packages/web              → dashboard :3737
 ```
 
-**Pembagian:** lpagent/fabriq di belakang Cloudflare → **Scrapling** (`StealthySession(solve_cloudflare=True)`, lebih stabil dari Camoufox mentah). On-chain + enrichment + UI = Node.
+## Data sources (all endpoints verified)
 
-## Sumber data (endpoint terverifikasi)
+| Source | Used for | Notes |
+|--------|----------|-------|
+| **Helius RPC** `mainnet.helius-rpc.com` (key in `.env`) | `getProgramAccounts` census, per-wallet open positions, `getSignaturesForAddress`, `/v0/transactions` batch-parse | Public RPCs BLOCK gPA; Helius allows it. **The credit budget is the real constraint.** |
+| **Meteora datapi** `dlmm.datapi.meteora.ag` | `/positions/{pool}/pnl?user=` → paginated positions w/ `pnlUsd/Sol`, `allTimeDeposits`, `createdAt/closedAt`, bin range. `/pools/{pool}` → `pool_config.bin_step`. `/pools?page=N` → 119k pools (10/page, ignores `limit`) | JSON, CORS-open, no Cloudflare. No wallet→positions endpoint. **Money values unreliable for some pools — see Known issues.** |
+| lpagent `app.lpagent.io/smart-lp?page=N` | optional curated metrics (~309 wallets) | RSC + Cloudflare → Scrapling only |
+| **Jupiter** `lite-api.jup.ag` | `/price/v3?ids=` token prices, `/tokens/v2/search` metadata | For the pending revaluation fix |
+| CoinGecko | live SOL price (USD toggle) | `web/src/lib/price.ts`, 60s cache + fallback |
 
-| Sumber | Dipakai untuk | Catatan |
-|--------|---------------|---------|
-| lpagent `app.lpagent.io/smart-lp?page=N` | discovery kurasi (~309) + metrik (win rate, fee, avg age, 7d/30d/all) | RSC + Cloudflare → scrape Scrapling. Full addr di href `?address=`, link ke solscan |
-| **Helius** `mainnet.helius-rpc.com` (key di `.env`) | `getProgramAccounts` (posisi terbuka; owner offset 40, lbPair offset 8) + parsed tx-history + active-wallet stream | RPC publik BLOKIR gPA; Helius izinkan. Key user ada di `.env` (gitignored) |
-| **Meteora datapi** `dlmm.datapi.meteora.ag` | PnL per pool (`/positions/{pool}/pnl?user=` → list posisi ber-`pnlUsd`/`pnlSol`, paginated), pool meta (`/pools/{pool}` → `pool_config.bin_step`), pool list (`/pools?page=N` → 119k pool) | JSON, CORS terbuka, no Cloudflare. Nggak ada endpoint LP-per-pool |
-| **Jupiter** `lite-api.jup.ag` | harga token (`/price/v3?ids=`) + metadata (`/tokens/v2/search`) | valuasi token / fallback |
-| CoinGecko | harga SOL realtime (USD toggle) | `web/src/lib/price.ts`, cache 60s + fallback |
+### Key on-chain constants
+- DLMM program: `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo`
+- `PositionV2` discriminator: `75b0d4c7f5b485b6` · layout `disc(8) | lbPair(32) | owner(32)`
+- `LbPair` (pool) discriminator: `210b3162b565b10d`
 
-## File penting
+## The tiered enrichment funnel (core design)
 
-| File | Peran |
-|------|-------|
-| `packages/core/src/classify.ts` | Klasifikasi: range (bin step, default 70 → `BIN_STEP_BANDS`), tempo (avg age), play (fast/multi), session (jam UTC) |
-| `packages/db/src/index.ts` | DB `node:sqlite`: wallets/snapshots/history + `upsertWallet` (COALESCE!), `recordHistory`, `getWindowDelta` |
-| `packages/ingest/src/adapters/meteora-datapi.ts` | Helius + datapi: `discoverActiveWallets`, `getWalletPools`, `getHistoricalPools` (freq+validasi), `getPoolPnl` (paginated), `getWalletDeepPnl`, `getWalletHoldingsUsd` |
-| `packages/ingest/src/adapters/jupiter.ts` | harga + metadata token |
-| `packages/ingest/src/adapters/lpagent.ts` | parser smart-lp/pools (pure, teruji fixture) |
-| `packages/ingest/src/worker.ts` | worker 24/7: discover→enrich→deep-enrich→snapshot |
-| `packages/ingest/src/{enrich,deep-enrich}.ts` | runner one-off (range/PnL; lifetime `--full`) |
-| `scraper/discover.py` | Scrapling scraper lpagent → DB |
-| `packages/web/src/app/page.tsx` | dashboard: header + leaderboard sortable + badge + USD/SOL + 12h/24h/7d/30d/all |
+Deep-analysing all 88k wallets would take **~91 days and ~17M Helius calls** — hence tiers:
 
-## Data model — angka mana yang mana (PENTING)
+| Tier | What | Cost | Runner |
+|------|------|------|--------|
+| **1 — census** | ONE `getProgramAccounts` (dataSlice offset 8 len 64 → lbPair+owner) maps **every** open position → per-wallet `open_positions` / `open_pools` | **1 query, ~8s for all 88k** | `discover-all.ts` |
+| **2 — quick** | Open positions only, page 1 per pool → live PnL + deposit size (whale signal) | ~1+pools calls, **1.5 wallets/s @ concurrency 10 → 88k in ~16h** | `quick-enrich.ts --limit N --concurrency 10` |
+| **3 — deep** | Full history walk (all sigs → batch-parse → all pools → all positions) → win rate, avg invested/age, lifetime PnL, range, session | ~200 calls, ~90s/wallet — **top N only** | `analytics-enrich.ts --limit N --order tier2` |
 
-- **Fee earned** (lpagent, SOL→USD): angka besar "puluhan ribu" (202 SOL ≈ $15k). Kolom `FEES`.
-- **Profit 7d/30d/all** (lpagent): PnL per-window, SOL. `all` = lifetime versi lpagent.
-- **12h/24h**: DELTA dari snapshot bot sendiri (`wallet_history`). Kosong sampai ada ≥2 snapshot — **no dummy**.
-- **Live PnL / deep PnL** (datapi): recompute on-chain. Deep = sum semua posisi (open+closed) semua pool ever → beda dari lpagent = nilai cross-check.
+`wallets.tier` tracks progress (1/2/3). Concurrency helper: `src/concurrency.ts` (`mapLimit`).
 
-## Cara jalanin (ringkas — detail di README)
+## Key files
+
+| File | Role |
+|------|------|
+| `packages/core/src/classify.ts` | Classification: range (bin step → `BIN_STEP_BANDS`), tempo (avg age), play type, session (UTC hours) |
+| `packages/db/src/index.ts` | `node:sqlite` layer, `upsertWallet` (**must COALESCE every field**), `migrate()`, `recordHistory`, `getWindowDelta` |
+| `packages/ingest/src/adapters/meteora-datapi.ts` | `censusWalletPositions`, `getWalletQuickStats`, `getWalletAnalytics`, `getHistoricalPools`, `getPoolPnl`, `getPoolBinStep`, sanity bounds |
+| `packages/ingest/src/adapters/jupiter.ts` | token prices + metadata |
+| `packages/ingest/src/{discover-all,quick-enrich,analytics-enrich}.ts` | tier 1 / 2 / 3 runners |
+| `packages/ingest/src/worker.ts` | 24/7 loop: census (hourly) + enrich + deep |
+| `packages/web/src/app/page.tsx` | dashboard: sortable leaderboard, badges, USD/SOL, watchlist star + rename |
+
+## Data model — which number is which
+
+- **Fees earned** (lpagent, SOL→USD): the big "tens of thousands" number (202 SOL ≈ $15k). `FEES` column.
+- **Profit 7d/30d/all** (lpagent): per-window PnL in SOL; `all` = lpagent's lifetime.
+- **12h/24h**: deltas from **our own** snapshots (`wallet_history`) — empty until the worker has run that long. **No dummy values.**
+- **On-chain PnL** (datapi): our own recompute. Deep = every position in every pool ever. Differs from lpagent = cross-check value.
+- **PnL is always much smaller than fees** — that's impermanent loss, not a bug. The friend's tool shows the same (fees $17k vs profit $6k).
+
+## Run
 
 ```bash
-npm install && npm run db:seed && npm run web          # dev, :3737
+npm install && npm run web                 # dashboard :3737
 # .env: SOLANA_RPC (Helius), HELIUS_API_KEY, METEORA_DATAPI
-node --env-file=.env node_modules/.bin/tsx packages/ingest/src/worker.ts   # 24/7
-python scraper/discover.py --pages 30                  # lpagent (Scrapling)
-tsx packages/ingest/src/deep-enrich.ts --full --limit 50   # lifetime penuh top wallet
+node --env-file=.env node_modules/.bin/tsx packages/ingest/src/discover-all.ts        # tier 1
+node --env-file=.env node_modules/.bin/tsx packages/ingest/src/quick-enrich.ts --limit 2000 --concurrency 10   # tier 2
+node --env-file=.env node_modules/.bin/tsx packages/ingest/src/analytics-enrich.ts --limit 50                  # tier 3
+node --env-file=.env node_modules/.bin/tsx packages/ingest/src/worker.ts             # 24/7 loop
 ```
-Tunable hardcoded di atas `worker.ts` (INTERVAL 5min, DISCOVER_PAGES 8, ENRICH_PER_PASS 30, DEEP_PER_PASS 3, DEEP_HISTORY_PAGES 60). Range bands di `core/classify.ts`.
+Worker tunables are hardcoded consts at the top of `worker.ts`. Range bands: `core/classify.ts`.
 
 ---
 
-## Status terkini (2026-07-15)
+## Current status (2026-07-15)
 
-### Sudah beres & terverifikasi data nyata ✅
-- **Dashboard** mirip tool teman: header lengkap + leaderboard **sortable** + badge 4-dimensi (range·tempo·play·session) + full addr→Solscan + toggle **USD/SOL** + harga SOL live + timeframe 12h/24h/7d/30d/all.
-- **Discovery on-chain** (`discoverActiveWallets`): wallet aktif dari stream tx DLMM → ribuan akumulatif. Tes: +17 wallet/pass (DB 36→53).
-- **Deep lifetime PnL** (`getWalletDeepPnl` + `--full`): enumerasi pool via frekuensi+validasi datapi (9ibgZH 5→57 pool, $1.9k→$3k di depth 30). Makin dalam makin penuh.
-- **Enrichment**: range (bin step), live PnL USD/SOL (paginated all positions), session (timestamp), tempo/play.
-- **Jupiter** wired (harga+metadata+holdings). **Scrapling** scraper lpagent. **Worker 24/7** produksi (tes `--once` 112s/pass).
-- DB 53 wallet (36 lpagent + 17 onchain), 26 dengan PnL.
+### Done & verified against real data ✅
+- **Discovery: solved.** Census = one gPA query → **88,042 wallets / 186,703 positions in 8s** (>2× the friend's 42k). DB holds **88,706** wallets.
+- **Tiered enrichment + concurrency**: tier 2 measured at **1.5 wallets/s (concurrency 10)** → full 88k coverage in **~16h instead of 91 days**.
+- **Deep analytics (tier 3)**: win rate, avg invested, avg age, positions/pools, lifetime PnL, monthly profit, first/last activity, range, session — all computed on-chain for ANY wallet. Verified: HUcjzp 59% win / 797 pos, 9ibgZH 65% / 1086 pos, EJRL 68% / 352 pos.
+- **Reliable pool enumeration**: `getSignaturesForAddress` (complete — 21,423 sigs for 9ibg) + Helius `/v0/transactions` batch-parse + **LbPair discriminator match** (deterministic, no frequency guessing).
+- Dashboard: sortable leaderboard, 4-dimension badges (range·tempo·play·session), full address → explorer, USD/SOL toggle + live SOL price, 12h/24h/7d/30d/all, watchlist star + rename (`/api/wallet`).
+- Deploy-ready: typecheck clean, production build + server verified, `deploy/` (systemd, `setup.sh`, Cloudflare Tunnel).
 
-### Baru selesai (2026-07-15, batch 1-4) ✅
-- **Top-LP per pool** — `getActivePools` (datapi /pools sort by vol24h) + `discoverPoolLps`
-  (feePayer non-swap tx pool = LP asli). Discovery utama worker → **+102 wallet/pass**
-  (vs 17), berkualitas (add/remove liquidity, bukan swapper). Ini juga **filter quality**.
-- **Kalibrasi bin step** — `BIN_STEP_BANDS` disesuaikan distribusi asli (stables bs 4-20,
-  memecoin 100+): tight <40, normal 40-90, wide 90-250, super_degen >250.
-- **Produksi** — `deploy/` (systemd worker/web/scraper + timer, cloudflared config,
-  deploy README). Fix `busy_timeout` (Python+Node dua writer ke SQLite). Postgres path
-  didokumentasikan (query surface terisolasi).
+### 🔴 Known issue — datapi money values are unreliable (BLOCKS ranking)
+datapi mis-prices some pools: we observed a single position at **~2e10 SOL** (more
+than total SOL supply) and wallet PnL of **-$50 trillion**. Magnitude sanity bounds
+(`MAX_SOL_PER_POSITION` / `MAX_USD_PER_POSITION` in `meteora-datapi.ts`) drop the worst,
+but the ranking is **still polluted** (e.g. -$224M PnL; 495 positions × ◎36,625 avg =
+18M SOL deposited — impossible when all of Meteora DLMM is worth hundreds of millions).
 
-### Discovery SOLVED — direct wallet census (2026-07-15) ✅
-User's insight: don't discover via pools — enumerate wallets DIRECTLY. `getProgram
-Accounts(DLMM, filter PositionV2 discriminator 75b0d4c7f5b485b6, dataSlice owner @40)`
-→ EVERY wallet with an open DLMM position in ONE query: **87,967 unique wallets in 7s**
-(>2× the friend's 42k). `discoverAllOpenPositionWallets()` + runner `discover-all.ts`
-(bulk insert, transaction). DB went 318→88,200. Worker's discover() now runs this
-census hourly + light program-stream for freshness (pool-sweep dropped — census is
-strictly better: no swap noise/overlap/plateau). LbPair pool discriminator = 210b3162
-b565b10d. Only OPEN positions (closed-only wallets caught by stream over time).
-Per-wallet pool enumeration (getHistoricalPools) also rewritten: getSignaturesForAddress
-(complete, e.g. 21,423 sigs for 9ibg) + Helius /v0/transactions batch-parse (100/call) +
-discriminator verify — reliable, vs the old flaky /addresses/{w}/transactions.
-NOW THE WORK = enriching 88k wallets (analytics) incrementally 24/7.
+**Magnitude filtering is a band-aid — do not trust tier-2 whale ranking yet.**
 
-### Depth: on-chain per-wallet analytics (2026-07-15) ✅ — the "root analysis"
-`getWalletAnalytics` (meteora-datapi.ts) computes win rate, avg invested, avg age,
-total positions/pools, lifetime PnL, avg monthly profit, first/last activity, range,
-session — ENTIRELY on-chain from datapi position data (each position has pnl,
-allTimeDeposits.total, createdAt/closedAt), for ANY wallet (not just lpagent). Runner:
-`analytics-enrich.ts --limit N --history-pages P --order new|fee|profit`. Worker's
-deep stage now calls it (was getWalletDeepPnl). Verified: HUcjzp 59% win / 797 pos,
-9ibgZH 65% / 1086 pos, EJRL 68% / 352 pos — computed & shown on dashboard. Note: this
-OVERWRITES lpagent's scraped win-rate/avg-age with on-chain values (canonical, one
-source, comparable across all wallets). getPoolPnl now returns per-position `rows`.
+**Proper fix (next task):** stop trusting datapi's USD/SOL. datapi returns raw token
+amounts (`allTimeDeposits.tokenX.amount` / `tokenY.amount` + mints) → value them
+ourselves with **Jupiter `/price/v3`**. That's the real normalization layer.
 
-### Watchlist + naming (2026-07-15) ✅
-Star (watchlist) kiri rank + pena (custom name) kanan wallet. Write via
-`app/api/wallet/route.ts` → `updateWallet` (web/lib/db.ts) → SQLite. Client komponen
-`app/WalletControls.tsx`. Kolom `starred`/`custom_name` sudah ada di DB. Terverifikasi.
+### Next
+1. **Jupiter-based revaluation** (above) — unblocks trustworthy whale ranking.
+2. Run tier 2 across all 88k (~16h) → then tier 3 on the real top N.
+3. Deploy to VPS (everything is ready) so census + enrichment accumulate 24/7.
+4. Wallet detail page + Jupiter token icons; fabriq as a second source + cross-check.
 
-### Next (belum) ⚠️
-1. **Wallet detail page** → lalu wire **Jupiter ke UI** (simbol/ikon token per posisi).
-   Bisa juga tambah filter "hanya watchlist" (WHERE starred=1) di leaderboard.
-   Adapter Jupiter sudah siap; leaderboard per-wallet nggak punya slot token.
-2. **Jalanin deep-enrich `--full` massal di VPS** → lifetime penuh (berat, pantau kredit Helius).
-3. **fabriq** sumber kedua + **normalisasi/cross-check** lpagent vs datapi (flag beda).
-4. Deploy beneran ke VPS (systemd + Tunnel) biar data akumulasi ke ribuan.
-
-### Catatan
-- `upsertWallet` HARUS COALESCE tiap field (upsert parsial dari sumber beda jangan wipe kolom lain).
-- Camoufox driver Node (`adapters/camoufox.ts`) = fallback; Scrapling jalur utama.
-- Deep recompute berat (~140s/wallet depth 30) → incremental, bukan sekaligus.
+### Notes / gotchas
+- `upsertWallet` **must** COALESCE every field — partial upserts from different tiers must not wipe columns.
+- Public RPC blocks `getProgramAccounts`; Helius is required.
+- Helius credits are the real scaling constraint — tune `DEEP_PER_PASS` / `--concurrency`.
+- Camoufox driver (`adapters/camoufox.ts`) is an unused fallback; Scrapling is the chosen path.
+- Don't run `next build` while `next dev` is running — it corrupts `.next` (500s).
 
 ## Git
 ```bash
-git add ...; git commit -m "feat/fix(scope): ..."
+git add ...; git commit -m "feat/fix(scope): ..."; git push origin main
 ```

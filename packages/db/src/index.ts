@@ -28,6 +28,11 @@ export interface WalletRow {
   // #3 — live PnL from Meteora datapi (open positions), USD + SOL
   pnlUsd: number | null;
   pnlSol: number | null;
+  // TIER-1 signal from the free census (no per-wallet calls)
+  openPositions: number | null;
+  openPools: number | null;
+  /** How deeply this wallet has been analysed: 0/null=none, 1=quick, 2=deep. */
+  tier: number | null;
   firstActivity: number | null;
   lastActivity: number | null;
 }
@@ -78,6 +83,9 @@ export function ensureTables(db: DatabaseSync) {
       session TEXT,
       pnl_usd REAL,
       pnl_sol REAL,
+      open_positions INTEGER,
+      open_pools INTEGER,
+      tier INTEGER,
       first_activity INTEGER,
       last_activity INTEGER,
       updated_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
@@ -104,6 +112,30 @@ export function ensureTables(db: DatabaseSync) {
     );
     CREATE INDEX IF NOT EXISTS hist_wallet_time_idx ON wallet_history(wallet, captured_at);
   `);
+  migrate(db);
+}
+
+/** Add columns introduced after a DB was first created (keeps existing rows). */
+function migrate(db: DatabaseSync) {
+  const columns: Array<[string, string]> = [
+    ["open_positions", "INTEGER"],
+    ["open_pools", "INTEGER"],
+    ["tier", "INTEGER"],
+  ];
+  for (const [name, type] of columns) {
+    try {
+      db.exec(`ALTER TABLE wallets ADD COLUMN ${name} ${type}`);
+    } catch {
+      /* already exists — fine */
+    }
+  }
+  // ranking indexes for the tiered enrichment funnel
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS wallets_tier_idx ON wallets(tier)");
+    db.exec("CREATE INDEX IF NOT EXISTS wallets_openpos_idx ON wallets(open_positions DESC)");
+  } catch {
+    /* ignore */
+  }
 }
 
 /** Record one point in a wallet's cumulative-stats time series (per scrape). */
@@ -147,8 +179,9 @@ export function upsertWallet(w: Partial<WalletRow> & { address: string }) {
       `INSERT INTO wallets
         (address, custom_name, starred, source, win_rate, fee_earned, total_pools,
          ev, avg_age_hours, avg_invested, avg_monthly_profit, tempo, play_type,
-         range_style, session, pnl_usd, pnl_sol, first_activity, last_activity)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         range_style, session, pnl_usd, pnl_sol, open_positions, open_pools, tier,
+         first_activity, last_activity)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(address) DO UPDATE SET
          source=COALESCE(excluded.source, wallets.source),
          win_rate=COALESCE(excluded.win_rate, wallets.win_rate),
@@ -164,6 +197,9 @@ export function upsertWallet(w: Partial<WalletRow> & { address: string }) {
          session=COALESCE(excluded.session, wallets.session),
          pnl_usd=COALESCE(excluded.pnl_usd, wallets.pnl_usd),
          pnl_sol=COALESCE(excluded.pnl_sol, wallets.pnl_sol),
+         open_positions=COALESCE(excluded.open_positions, wallets.open_positions),
+         open_pools=COALESCE(excluded.open_pools, wallets.open_pools),
+         tier=COALESCE(excluded.tier, wallets.tier),
          first_activity=COALESCE(excluded.first_activity, wallets.first_activity),
          last_activity=COALESCE(excluded.last_activity, wallets.last_activity),
          updated_at=unixepoch()*1000`,
@@ -174,6 +210,7 @@ export function upsertWallet(w: Partial<WalletRow> & { address: string }) {
       w.avgAgeHours ?? null, w.avgInvested ?? null, w.avgMonthlyProfit ?? null,
       w.tempo ?? null, w.playType ?? null, w.rangeStyle ?? null, w.session ?? null,
       w.pnlUsd ?? null, w.pnlSol ?? null,
+      w.openPositions ?? null, w.openPools ?? null, w.tier ?? null,
       w.firstActivity ?? null, w.lastActivity ?? null,
     );
 }
@@ -196,6 +233,7 @@ export function listWallets(): WalletRow[] {
               ev, avg_age_hours AS avgAgeHours, avg_invested AS avgInvested,
               avg_monthly_profit AS avgMonthlyProfit, tempo, play_type AS playType,
               range_style AS rangeStyle, session, pnl_usd AS pnlUsd, pnl_sol AS pnlSol,
+              open_positions AS openPositions, open_pools AS openPools, tier,
               first_activity AS firstActivity,
               last_activity AS lastActivity FROM wallets`)
     .all() as unknown as WalletRow[];

@@ -21,16 +21,22 @@ function arg(name: string, def: string) {
 async function main() {
   const limit = Number(arg("limit", "20"));
   const historyPages = Number(arg("history-pages", "30"));
-  const order = arg("order", "new");
+  const order = arg("order", "tier2");
   const db = getDb();
 
-  // "new" = wallets never analysed yet (win_rate null) first; else biggest fee/profit.
+  // TIER 3 targeting. Default ("tier2") takes the wallets the cheap pass already
+  // ranked — biggest deposits first — so the expensive full-history walk is only
+  // spent on wallets that actually matter.
   const sql =
     order === "fee"
       ? `SELECT address FROM wallets ORDER BY (fee_earned IS NULL), fee_earned DESC, updated_at ASC LIMIT ?`
       : order === "profit"
         ? `SELECT w.address FROM wallets w LEFT JOIN wallet_snapshots s ON s.wallet=w.address AND s.timeframe='all' ORDER BY COALESCE(s.profit,0) DESC LIMIT ?`
-        : `SELECT address FROM wallets ORDER BY (win_rate IS NOT NULL), updated_at ASC LIMIT ?`;
+        : order === "new"
+          ? `SELECT address FROM wallets ORDER BY (win_rate IS NOT NULL), updated_at ASC LIMIT ?`
+          : `SELECT address FROM wallets
+             WHERE COALESCE(tier,0) = 2
+             ORDER BY COALESCE(avg_invested,0) DESC, COALESCE(open_positions,0) DESC LIMIT ?`;
   const rows = db.prepare(sql).all(limit) as Array<{ address: string }>;
 
   console.log(`Analysing ${rows.length} wallets (history-pages ${historyPages})…`);
@@ -46,6 +52,7 @@ async function main() {
       const session = classifySession(a.openTimes.map((t) => new Date(t * 1000).getUTCHours()));
       upsertWallet({
         address,
+        tier: 3, // deep analysis complete
         winRate: a.winRate == null ? null : a.winRate * 100, // stored as %
         totalPools: a.totalPools,
         avgInvested: a.avgInvestedSol,     // SOL
