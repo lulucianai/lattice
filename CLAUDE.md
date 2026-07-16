@@ -103,23 +103,41 @@ Worker tunables are hardcoded consts at the top of `worker.ts`. Range bands: `co
 - Dashboard: sortable leaderboard, 4-dimension badges (range·tempo·play·session), full address → explorer, USD/SOL toggle + live SOL price, 12h/24h/7d/30d/all, watchlist star + rename (`/api/wallet`).
 - Deploy-ready: typecheck clean, production build + server verified, `deploy/` (systemd, `setup.sh`, Cloudflare Tunnel).
 
-### 🔴 Known issue — datapi money values are unreliable (BLOCKS ranking)
-datapi mis-prices some pools: we observed a single position at **~2e10 SOL** (more
-than total SOL supply) and wallet PnL of **-$50 trillion**. Magnitude sanity bounds
-(`MAX_SOL_PER_POSITION` / `MAX_USD_PER_POSITION` in `meteora-datapi.ts`) drop the worst,
-but the ranking is **still polluted** (e.g. -$224M PnL; 495 positions × ◎36,625 avg =
-18M SOL deposited — impossible when all of Meteora DLMM is worth hundreds of millions).
+### ⚠️ Data quality — broken pool pricing (understood + quarantined)
 
-**Magnitude filtering is a band-aid — do not trust tier-2 whale ranking yet.**
+**Do not "fix" this with Jupiter spot prices — that was investigated and is wrong.**
 
-**Proper fix (next task):** stop trusting datapi's USD/SOL. datapi returns raw token
-amounts (`allTimeDeposits.tokenX.amount` / `tokenY.amount` + mints) → value them
-ourselves with **Jupiter `/price/v3`**. That's the real normalization layer.
+What we verified:
+- datapi's PnL **method is correct**. `/positions/{positionAddress}/historical` returns
+  the event log (`add` / `remove` / `claim_fee`) with `amountX/Y`, `amountXUsd/YUsd`,
+  `totalUsd` and `blockTime` — **each event valued at its own block time**, not spot.
+  Recomputing PnL as `Σremove + Σclaim − Σadd` reproduces datapi's `pnlUsd` **exactly**
+  (validated: $0.01 vs $0.01 on a closed position).
+- So historical pricing is already handled. **Jupiter `/price/v3` is SPOT-only** —
+  using it to value past deposits would wreck PnL for tokens that later rugged
+  (a $10k deposit in a since-rugged token would be valued ~$0). Jupiter is fine for
+  token metadata/icons and current-holdings valuation, NOT for historical PnL.
+
+The actual defect: datapi's **price feed is broken for some pools** (seen: one position
+at ~2e10 SOL — more than the SOL supply; wallet PnL of -$50T). It is per-pool corruption,
+not a methodology error, so recomputing from the same events changes nothing.
+
+Mitigation in place (two layers, both heuristics):
+1. Per-position bounds `MAX_SOL_PER_POSITION` / `MAX_USD_PER_POSITION` — drop absurd rows.
+2. **Wallet-level quarantine** (`WalletQuickStats.trusted`, `MAX_WALLET_DEPOSIT_SOL` /
+   `MAX_WALLET_PNL_USD`): per-position bounds are insufficient because many
+   moderately-wrong positions still sum to nonsense (162 positions → -$224M). Untrusted
+   wallets are marked `tier=2` but stored with **no money values**, so they can never
+   contaminate the ranking. Measured: ~4% of wallets quarantined.
+
+Residual risk: values just under the caps (±$5–9M) may still be noise rather than real
+whales. If precision matters, quarantine by detecting implausible **implied token price**
+per event (`amountUsd / amount`) and blacklist the offending pools.
 
 ### Next
-1. **Jupiter-based revaluation** (above) — unblocks trustworthy whale ranking.
-2. Run tier 2 across all 88k (~16h) → then tier 3 on the real top N.
-3. Deploy to VPS (everything is ready) so census + enrichment accumulate 24/7.
+1. Run tier 2 across all 88k (~16h at concurrency 10) → then tier 3 on the real top N.
+2. Deploy to VPS (everything is ready) so census + enrichment accumulate 24/7.
+3. Optional precision: per-pool price-feed blacklist (see residual risk above).
 4. Wallet detail page + Jupiter token icons; fabriq as a second source + cross-check.
 
 ### Notes / gotchas

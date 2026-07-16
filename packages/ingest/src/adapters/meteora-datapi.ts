@@ -412,7 +412,24 @@ export interface WalletQuickStats {
   pnlSol: number;
   depositUsd: number;
   depositSol: number;
+  /**
+   * False when the aggregate is implausible for a Meteora LP — meaning at least one
+   * of this wallet's pools has a broken price feed and the totals are meaningless.
+   * Callers must NOT rank on the money fields when this is false.
+   *
+   * Why wallet-level: datapi's PnL *method* is correct (verified — recomputing from
+   * its own historical add/remove/claim events, each valued at its own blockTime,
+   * reproduces pnlUsd exactly). The corruption is per-pool price data, and a wallet
+   * can hold many positions that each pass a per-position bound while their sum is
+   * still absurd (seen: 162 positions summing to -$224M).
+   */
+  trusted: boolean;
 }
+
+// Whole of Meteora DLMM is worth a few hundred million; one wallet past these is
+// definitionally a data bug, not a whale.
+const MAX_WALLET_DEPOSIT_SOL = 200_000;   // ≈ $15M
+const MAX_WALLET_PNL_USD = 20_000_000;
 
 /**
  * TIER 2 — the cheap real-money signal. Looks ONLY at the wallet's currently-open
@@ -435,7 +452,9 @@ export async function getWalletQuickStats(wallet: string): Promise<WalletQuickSt
       /* datapi can't price this pool — skip */
     }
   }
-  return { pools: pools.length, positions, pnlUsd, pnlSol, depositUsd, depositSol };
+  const trusted =
+    Math.abs(depositSol) <= MAX_WALLET_DEPOSIT_SOL && Math.abs(pnlUsd) <= MAX_WALLET_PNL_USD;
+  return { pools: pools.length, positions, pnlUsd, pnlSol, depositUsd, depositSol, trusted };
 }
 
 export interface WalletAnalytics {

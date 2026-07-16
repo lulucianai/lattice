@@ -39,24 +39,32 @@ async function main() {
 
   console.log(`Quick-enriching ${rows.length} wallets, concurrency ${concurrency}…`);
   const t0 = Date.now();
-  let done = 0, withMoney = 0;
+  let done = 0, withMoney = 0, quarantined = 0;
 
   await mapLimit(
     rows,
     concurrency,
     async ({ address }) => {
       const s = await getWalletQuickStats(address);
-      upsertWallet({
-        address,
-        tier: 2,
-        openPools: s.pools,
-        pnlUsd: s.pnlUsd,
-        pnlSol: s.pnlSol,
-        // avg deposit per open position (SOL) — the whale signal
-        avgInvested: s.positions > 0 ? s.depositSol / s.positions : null,
-      });
+      // Untrusted = at least one of its pools has a broken price feed. Mark the
+      // wallet done (so we don't reprocess it) but store NO money values, so it
+      // can never contaminate the ranking. Better a gap than a fake whale.
+      upsertWallet(
+        s.trusted
+          ? {
+              address,
+              tier: 2,
+              openPools: s.pools,
+              pnlUsd: s.pnlUsd,
+              pnlSol: s.pnlSol,
+              // avg deposit per open position (SOL) — the whale signal
+              avgInvested: s.positions > 0 ? s.depositSol / s.positions : null,
+            }
+          : { address, tier: 2, openPools: s.pools },
+      );
       done++;
-      if (s.depositUsd > 0) withMoney++;
+      if (!s.trusted) quarantined++;
+      else if (s.depositUsd > 0) withMoney++;
       if (done % 100 === 0) {
         const rate = done / ((Date.now() - t0) / 1000);
         console.log(`  ${done}/${rows.length} · ${rate.toFixed(1)}/s · eta ${(((rows.length - done) / rate) / 60).toFixed(0)}m`);
@@ -67,7 +75,8 @@ async function main() {
 
   const secs = (Date.now() - t0) / 1000;
   console.log(
-    `Done. ${done}/${rows.length} in ${secs.toFixed(0)}s (${(done / secs).toFixed(1)}/s) · ${withMoney} with deposits.`,
+    `Done. ${done}/${rows.length} in ${secs.toFixed(0)}s (${(done / secs).toFixed(1)}/s) · ` +
+      `${withMoney} with deposits · ${quarantined} quarantined (broken pool pricing).`,
   );
 }
 
