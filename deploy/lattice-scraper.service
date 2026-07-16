@@ -1,0 +1,9 @@
+[Unit]
+Description=lattice lpagent scraper (Scrapling, oneshot — driven by the .timer)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/lattice
+ExecStart=/opt/lattice/.venv/bin/python scraper/discover.py --pages 30

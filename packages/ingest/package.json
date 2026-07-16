@@ -1,0 +1,19 @@
+{
+  "name": "@lattice/ingest",
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b",
+    "start": "tsx src/worker.ts",
+    "once": "tsx src/worker.ts --once",
+    "verify": "tsx src/adapters/verify-parsers.ts"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.98.4",
+    "@lattice/core": "*",
+    "@lattice/db": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2"
+  }
+}

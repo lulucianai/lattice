@@ -1,0 +1,16 @@
+[Unit]
+Description=lattice dashboard (Next.js)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/lattice
+Environment=NODE_ENV=production
+# build once (npm run build -w @lattice/web), then serve:
+ExecStart=/usr/bin/npm run start -w @lattice/web
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

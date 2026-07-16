@@ -1,0 +1,19 @@
+[Unit]
+Description=lattice on-chain worker (discover + enrich + deep-enrich, 24/7)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/lattice
+# --env-file loads .env (SOLANA_RPC / HELIUS_API_KEY / METEORA_DATAPI)
+ExecStart=/usr/bin/node --env-file=.env node_modules/.bin/tsx packages/ingest/src/worker.ts
+Restart=always
+RestartSec=15
+# tune per pass without editing code:
+# Environment=INGEST_INTERVAL_MS=300000
+# Environment=POOL_SWEEP=25
+# Environment=DEEP_PER_PASS=3
+
+[Install]
+WantedBy=multi-user.target

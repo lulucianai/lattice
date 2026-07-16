@@ -1,0 +1,22 @@
+{
+  "name": "lattice",
+  "private": true,
+  "version": "0.0.1",
+  "description": "24/7 tracker for top Meteora DLMM LP wallets — on-chain PnL/fee + playstyle classification.",
+  "workspaces": [
+    "packages/core",
+    "packages/db",
+    "packages/ingest",
+    "packages/web"
+  ],
+  "scripts": {
+    "ingest": "npm run start -w @lattice/ingest",
+    "web": "npm run dev -w @lattice/web",
+    "db:push": "npm run push -w @lattice/db",
+    "db:seed": "npm run seed -w @lattice/db",
+    "typecheck": "tsc -b"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
